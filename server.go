@@ -3,7 +3,6 @@ package raft
 import (
 	"fmt"
 	"io"
-	"os"
 	"path"
 	"sync"
 	"time"
