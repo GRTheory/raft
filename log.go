@@ -252,7 +252,7 @@ func (l *Log) commitInfo() (index uint64, term uint64) {
 }
 
 // Retrieves the last index and term that has been appended to the log.
-func (l *Log) lastInfo() (index uint64, term uint64){
+func (l *Log) lastInfo() (index uint64, term uint64) {
 	l.mutex.RLock()
 	defer l.mutex.RUnlock()
 
@@ -261,7 +261,83 @@ func (l *Log) lastInfo() (index uint64, term uint64){
 		return l.startIndex, l.startTerm
 	}
 
-	// Return the last index & term 
+	// Return the last index & term
 	entry := l.entries[len(l.entries)-1]
 	return entry.Index(), entry.Term()
+}
+
+// Update the commit index
+func (l *Log) updateCommitIndex(index uint64) {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+	if index > l.commitIndex {
+		l.commitIndex = index
+	}
+	// debugln("update.commit.index ", index)
+}
+
+// Update the commit index and writes entries after that index to the stabe storage.
+func (l *Log) setCommitIndex(index uint64) error {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+
+	// this is not error any more after limited the number of sending entries
+	// commit up to what we alraady have.
+	if index > l.startIndex+uint64(len(l.entries)) {
+		// debugln("raft.Log: Commit index", index, "set back to ", len(l.entries))
+		index = l.startIndex + uint64(len(l.entries))
+	}
+
+	// Do not allow previous indices to be committed again.
+
+	// This could happens, since the guarantee is that the new leader has up-to-dated
+	// log entries rather than has nost up-to-dated committed index
+
+	// For example, Leader 1 send log 80 to follower 2 and follower 3
+	// follower 2 and follower 3 all got the new entries and reply
+	// leader 1 committed entry 80 and send reply to follower 2 and follower 3
+	// follower 2 receive the new committed index and update committed index to 80
+	// leader 1 fail to send the committed index to follower 3
+	// follower 3 promote to leader (server 1 and server 2 will vote, since leader 3
+	// has up-to-dated the entries)
+	// when new leader 3 send heartbeat with committed index = 0 to follower 2,
+	// follower 2 should reply success and let leader 3 update the committed index to 80
+
+	if index < l.commitIndex {
+		return nil
+	}
+
+	// Find all entries whose index is between the previous index and the current index.
+	for i := l.commitIndex + 1; i <= index; i++ {
+		entryIndex := i - 1 - l.startIndex
+		entry := l.entries[entryIndex]
+
+		// Update commit index.
+		l.commitIndex = entry.Index()
+
+		// Decode the command.
+		command, err := newCommand(entry.CommandName(), entry.Command())
+		if err != nil {
+			return err
+		}
+
+		// Apply the changes to the state machine and store the error code.
+		returnValue, err := l.ApplyFunc(entry, command)
+
+		// debugf("setCommitIndex.set.result index； %v,entries index: %v", i, entryIndex)
+		if entry.event != nil {
+			entry.event.returnValue = returnValue
+			entry.event.c <- err
+		}
+
+		_, isJoinCommand := command.(JoinCommand)
+
+		// we can only commit up to the most recent join command
+		// if there is a join in this batch of commands.
+		// after this commit, we need to recalculate the majority.
+		if isJoinCommand {
+			return nil
+		}
+	}
+	return nil
 }
