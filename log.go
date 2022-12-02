@@ -341,3 +341,11 @@ func (l *Log) setCommitIndex(index uint64) error {
 	}
 	return nil
 }
+
+// Set the commitIndex at the head of the log file to the current
+// commit Index. This should be called after obtained a log lock
+func (l *Log) flushCommitIndex() {
+	l.file.Seek(0, io.SeekStart)
+	fmt.Fprintf(l.file, "%8x\n", l.commitIndex)
+	l.file.Seek(0, io.SeekEnd)
+}
