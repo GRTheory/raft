@@ -32,6 +32,11 @@ type server struct {
 	c                 chan *ev
 	electionTimeout   time.Duration
 	heartbeatInterval time.Duration
+
+	StateMachine            StateMachine
+	maxLogEntriesPerReqesut uint64
+
+	routineGroup sync.WaitGroup
 }
 
 type ev struct {
@@ -85,4 +90,3 @@ func (s *server) Term() uint64 {
 	defer s.mutex.RUnlock()
 	return s.currentTerm
 }
-
