@@ -13,10 +13,10 @@ import (
 
 // A log is a collection of log entries that are persisted to durable storage.
 type Log struct {
-	ApplyFunc   func(*LogEntry, Command) (interface{}, error)
-	file        *os.File
-	path        string
-	entries     []*LogEntry
+	ApplyFunc   func(*LogEntry, Command) (interface{}, error) // the function which apply the log entry to state machine.
+	file        *os.File                                      // the handle of the log file.
+	path        string                                        // the file path.
+	entries     []*LogEntry                                   // the log cache in memory.
 	commitIndex uint64
 	mutex       sync.RWMutex
 	startIndex  uint64 // the index before the first entry in the Log entries
