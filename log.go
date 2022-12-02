@@ -428,7 +428,7 @@ func (l *Log) appendEntries(entries []*protobuf.LogEntry) error {
 
 	var size int64
 	var err error
-	// Append each enry but exit if we hit an error.
+	// Append each entry but exit if we hit an error.
 	for i := range entries {
 		LogEntry := &LogEntry{
 			log:      l,
