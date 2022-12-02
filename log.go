@@ -1,10 +1,14 @@
 package raft
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"sync"
+
+	"github.com/GRTheory/raft/protobuf"
 )
 
 // A log is a collection of log entries that are persisted to durable storage.
@@ -348,4 +352,223 @@ func (l *Log) flushCommitIndex() {
 	l.file.Seek(0, io.SeekStart)
 	fmt.Fprintf(l.file, "%8x\n", l.commitIndex)
 	l.file.Seek(0, io.SeekEnd)
+}
+
+// Truncate the log to the given index and term. This only works if the log
+// at the index has not been commited.
+func (l *Log) truncate(index uint64, term uint64) error {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+	// debugln("log.truncate: ", index)
+
+	// Do not allow committed entries to be truncated.
+	if index < l.commitIndex {
+		// debugln("log.truncate.before")
+		return fmt.Errorf("raft.Log: Index is already committed (%v): (IDX=%v, TERM=%v)", l.commitIndex, index, term)
+	}
+
+	// Do not truncate past end of entries.
+	if index > l.startIndex+uint64(len(l.entries)) {
+		// debugln("log.truncate.after")
+		return fmt.Errorf("raft.Log: Entry index does not exist (MAX=%v): (IDX=%v, TERM=%v)", len(l.entries), index, term)
+	}
+
+	// If we're truncating everything then just clear the entries.
+	if index == l.startIndex {
+		// debugln("log.truncate.clear")
+		l.file.Truncate(0)
+		l.file.Seek(0, io.SeekStart)
+
+		// notify clients if this node is the previous leader
+		for _, entry := range l.entries {
+			if entry.event != nil {
+				entry.event.c <- errors.New("command failed to be committed due to node failure")
+			}
+		}
+
+		l.entries = []*LogEntry{}
+	} else {
+		// Do not truncate if the entry at index does not have the matching term.
+		entry := l.entries[index-l.startIndex-1]
+		if len(l.entries) > 0 && entry.Term() != term {
+			// debugln("log.truncate.termMismatch")
+			return fmt.Errorf("raft.Log: Entry at index does not have matching term (%v): (IDX=%v, TERM=%v)", entry.Term(), index, term)
+		}
+
+		// Otherwise truncate up to the desired entry.
+		if index < l.startIndex+uint64(len(l.entries)) {
+			// debugln("log.truncate.finish")
+			position := l.entries[index-l.startIndex].Position
+			l.file.Truncate(position)
+			l.file.Seek(position, io.SeekStart)
+
+			// notify clients if this node is the previous leader.
+			for i := index - l.startIndex; i < uint64(len(l.entries)); i++ {
+				entry := l.entries[i]
+				if entry.event != nil {
+					entry.event.c <- errors.New("command failed to be committed due to node failure")
+				}
+			}
+
+			l.entries = l.entries[0 : index-l.startIndex]
+		}
+	}
+
+	return nil
+}
+
+// Appends a series of entries to the log.
+func (l *Log) appendEntries(entries []*protobuf.LogEntry) error {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+
+	startPosition, _ := l.file.Seek(0, io.SeekCurrent)
+
+	w := bufio.NewWriter(l.file)
+
+	var size int64
+	var err error
+	// Append each enry but exit if we hit an error.
+	for i := range entries {
+		LogEntry := &LogEntry{
+			log:      l,
+			Position: startPosition,
+			pb:       entries[i],
+		}
+
+		if size, err = l.writeEntry(LogEntry, w); err != nil {
+			return err
+		}
+
+		startPosition += size
+	}
+	w.Flush()
+	err = l.sync()
+
+	if err != nil {
+		return nil
+	}
+
+	return nil
+}
+
+// Writes a single log entry to the end of the log.
+func (l *Log) appendEntry(entry *LogEntry) error {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+
+	if l.file == nil {
+		return errors.New("raft.Log: Log is not open")
+	}
+
+	// Make sure the term and index are greater than the previous.
+	if len(l.entries) > 0 {
+		lastEntry := l.entries[len(l.entries)-1]
+		if entry.Term() < lastEntry.Term() {
+			return fmt.Errorf("raft.Log: Cannot append entry with earlier term (%x:%x <= %x:%x)", entry.Term(), entry.Index(), lastEntry.Term(), lastEntry.Index())
+		} else if entry.Term() == lastEntry.Term() && entry.Index() <= lastEntry.Index() {
+			return fmt.Errorf("raft.Log: Cannot append entry with earlier index in the same term (%x:%x <= %x:%x)", entry.Term(), entry.Index(), lastEntry.Term(), lastEntry.Index())
+		}
+	}
+
+	position, _ := l.file.Seek(0, io.SeekCurrent)
+
+	entry.Position = position
+
+	// Write to storage.
+	if _, err := entry.Encode(l.file); err != nil {
+		return err
+	}
+
+	// Append to entries list if stored on disk.
+	l.entries = append(l.entries, entry)
+
+	return nil
+}
+
+// appendEntry with Buffered io
+func (l *Log) writeEntry(entry *LogEntry, w io.Writer) (int64, error) {
+	if l.file == nil {
+		return -1, errors.New("raft.Log: Log is not open")
+	}
+
+	// Make sure the term and index are greater than the previous.
+	if len(l.entries) > 0 {
+		lastEntry := l.entries[len(l.entries)-1]
+		if entry.Term() < lastEntry.Term() {
+			return -1, fmt.Errorf("raft.Log: Cannot append entry with earlier term (%x:%x <= %x:%x)", entry.Term(), entry.Index(), lastEntry.Term(), lastEntry.Index())
+		} else if entry.Term() == lastEntry.Term() && entry.Index() <= lastEntry.Index() {
+			return -1, fmt.Errorf("raft.Log: Cannot append entry with earlier index in the same term (%x:%x <= %x:%x)", entry.Term(), entry.Index(), lastEntry.Term(), lastEntry.Index())
+		}
+	}
+
+	// Write to storage.
+	size, err := entry.Encode(w)
+	if err != nil {
+		return -1, err
+	}
+
+	// Append to entries list if stored on disk.
+	l.entries = append(l.entries, entry)
+
+	return int64(size), nil
+}
+
+// Compact the log before index (including index)
+func (l *Log) compact(index uint64, term uint64) error {
+	var entries []*LogEntry
+
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+
+	if index == 0 {
+		return nil
+	}
+	// nothing to compaction
+	// the index may be greater than the current index if
+	// we just recovery from on snapshot.
+	if index >= l.internalCurrentIndex() {
+		entries = make([]*LogEntry, 0)
+	} else {
+		// get all log entries after index.
+		entries = l.entries[index-l.startIndex:]
+	}
+
+	// create a new log file and add all the entries.
+	new_file_path := l.path + ".new"
+	file, err := os.OpenFile(new_file_path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		position, _ := l.file.Seek(0, io.SeekCurrent)
+		entry.Position = position
+
+		if _, err = entry.Encode(file); err != nil {
+			file.Close()
+			os.Remove(new_file_path)
+			return err
+		}
+	}
+	file.Sync()
+
+	old_file := l.file
+
+	// rename the new log file
+	err = os.Rename(new_file_path, l.path)
+	if err != nil {
+		file.Close()
+		os.Remove(new_file_path)
+		return err
+	}
+	l.file = file
+
+	// close the old log file
+	old_file.Close()
+
+	// compaction the in memory log.
+	l.entries = entries
+	l.startIndex = index
+	l.startTerm = term
+	return nil
 }
