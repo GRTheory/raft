@@ -7,9 +7,11 @@ import (
 )
 
 const (
-	Follower  = "follower"
-	Candidate = "ccandidate"
-	Leader    = "leader"
+	Stopped     = "stopped"
+	Initialized = "initialized"
+	Follower    = "follower"
+	Candidate   = "ccandidate"
+	Leader      = "leader"
 )
 
 type Server interface {
@@ -19,6 +21,7 @@ type server struct {
 	name        string
 	path        string
 	state       string // follower, candidate, leader
+	transporter Transporter
 	currentTerm uint64 // when a new leader is elected, it will start a new term
 
 	voteFor    string // vote for some other candidate.
@@ -89,4 +92,43 @@ func (s *server) Term() uint64 {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	return s.currentTerm
+}
+
+// Retrieves the object that transports requests.
+func (s *server) Transporter() Transporter {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	return s.transporter
+}
+
+// Checks if the server is currently running.
+func (s *server) Running() bool {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	return (s.state != Stopped && s.state != Initialized)
+}
+
+func (s *server) sendAsync(value interface{}) {
+	if !s.Running() {
+		return
+	}
+
+	event := &ev{target: value, c: make(chan error, 1)}
+	// try a non-blocking send first
+	// in most cases, this should not be blocking
+	// avoid create unnecessary go routines
+	select {
+	case s.c <- event:
+		return
+	default:
+	}
+
+	s.routineGroup.Add(1)
+	go func() {
+		defer s.routineGroup.Done()
+		select {
+		case s.c <- event:
+		case <-s.stopped:
+		}
+	}()
 }
