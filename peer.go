@@ -92,17 +92,19 @@ func (p *Peer) clone() *Peer {
 // 	}
 // }
 
-// func (p *Peer) flush(){
-// 	// debugln("peer.heartbeat.flush: ", p.Name)
-// 	prevLogIndex := p.getPrevLogIndex()
-// 	term := p.server.currentTerm
+func (p *Peer) flush() {
+	// debugln("peer.heartbeat.flush: ", p.Name)
+	prevLogIndex := p.getPrevLogIndex()
+	term := p.server.currentTerm
 
-// 	entries, prevLogTerm := p.server.log.getEntriesAfter(prevLogIndex, p.server.maxLogEntriesPerReqesut)
+	entries, prevLogTerm := p.server.log.getEntriesAfter(prevLogIndex, p.server.maxLogEntriesPerReqesut)
 
-// 	if entries != nil {
-
-// 	}
-// }
+	if entries != nil {
+		p.sendAppendEntriesRequest(newAppendEntriesReqeust(term, prevLogIndex, prevLogTerm, p.server.log.CommitIndex(), p.server.name, entries))
+	} else {
+		// TODO send snapshot to the peers
+	}
+}
 
 // Sends an AppendEntries request to the peer through the transport.
 func (p *Peer) sendAppendEntriesRequest(req *AppendEntriesRequest) {
